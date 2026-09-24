@@ -304,7 +304,39 @@ function drawRoute(){
  routeLine=L.polyline(route.coords,{color:c.getPropertyValue("--route").trim()||"#0E6F74",weight:6}).addTo(map);
 }
 
-/* ===== データ：OpenStreetMapから周辺の喫煙所を追加 ===== */
+/* ===== データ ===== */
+// 重複チェックして追加（手入力データを優先。種類の情報だけもらう）
+function addSpot(s){
+ if(spots.some(x=>x.id===s.id)) return false;
+ const dup=spots.find(x=>dist(x,s)<35);
+ if(dup){ if(s.tobacco==="both") dup.tobacco="both"; else if(s.tobacco==="heated"&&!dup.tobacco) dup.tobacco="heated";
+   if(s.covered&&dup.covered==null) dup.covered=true; return false; }
+ spots.push(s); return true;
+}
+
+/* 1) 自前のデータ（GitHub Actionsが週1回作る地域ごとのファイル）を、いる場所の周りだけ読む */
+const TILE_BASES=["data/","https://raw.githubusercontent.com/kyouichitani-cloud/ippuku-navi/main/data/"];
+let tileIndex, tilesLoaded=new Set();
+async function getJSON(path){
+ for(const b of TILE_BASES){ try{ const r=await fetch(b+path,{cache:"no-cache"}); if(r.ok) return await r.json(); }catch(e){} }
+ return null;
+}
+async function loadTiles(p){
+ if(tileIndex===undefined){ const idx=await getJSON("index.json"); tileIndex=idx&&idx.tiles?new Set(idx.tiles):null; }
+ if(!tileIndex) return false;
+ const la=Math.floor(p.lat*10), lo=Math.floor(p.lng*10); let added=0; const jobs=[];
+ for(let dy=-1;dy<=1;dy++) for(let dx=-1;dx<=1;dx++){ const k=(la+dy)+"_"+(lo+dx);
+   if(!tileIndex.has(k)||tilesLoaded.has(k)) continue; tilesLoaded.add(k);
+   jobs.push(getJSON("tiles/"+k+".json").then(recs=>{ if(!recs){ tilesLoaded.delete(k); return; }
+     for(const r of recs){ const s={...r, hours:r.oh==="24/7"?[[0,1440]]:null, ohText:r.oh&&r.oh!=="24/7"?r.oh:null}; delete s.oh; if(addSpot(s)) added++; } })); }
+ await Promise.all(jobs);
+ if(added&&mode==="browse"&&me) rerank(ranked[choice]?.id);
+ return true;
+}
+// 周りのデータを読む：自前データがあればそれを使い、なければOpenStreetMapに直接聞く
+async function loadArea(p){ const ok=await loadTiles(p); if(!ok) await loadOSM(p); }
+
+/* 2) 予備：OpenStreetMapから周辺の喫煙所を直接取得 ===== */
 // 日本全体は持たずに、いる場所（地図を動かした場所）の周りだけ、その都度取りにいく
 async function loadOSM(p,radius=SEARCH_RADIUS){
  const key=p.lat.toFixed(2)+","+p.lng.toFixed(2)+"@"+radius; if(overpassDone.has(key)) return; overpassDone.add(key);
@@ -326,11 +358,7 @@ async function loadOSM(p,radius=SEARCH_RADIUS){
    const s={id:"osm-"+e.type+e.id,lat,lng,name:t["name:ja"]||t.name||"喫煙所（名称なし）",place:t.indoor==="yes"?"屋内":t.covered==="yes"?"屋外（屋根あり）":"屋外",
      floor:t.level!=null?(Number(t.level)<0?"B"+Math.abs(t.level):Number(t.level)+1+"F"):"地上",memo:t.description||t.note||"OpenStreetMapの登録データ", tobacco:tobaccoOf(t),
      ohText:t.opening_hours==="24/7"?null:t.opening_hours, covered:t.indoor==="yes"||t.covered==="yes"||["indoor","yes"].includes(t.shelter)||t.amenity==="smoking_room", hours:t.opening_hours==="24/7"?[[0,1440]]:null};
-   const dup=spots.find(x=>dist(x,s)<35);
-   if(dup){ // 手入力データと重複したら手入力を優先。種類の情報だけもらう
-     if(s.tobacco==="both") dup.tobacco="both"; else if(s.tobacco==="heated"&&!dup.tobacco) dup.tobacco="heated";
-     continue; }
-   spots.push(s); added++;
+   if(addSpot(s)) added++;
   }
   const near=spots.filter(x=>dist(x,p)<radius).length;
   if(near<3&&radius<3000){ loadOSM(p,3000); } // 少なければ範囲を広げる
@@ -338,7 +366,7 @@ async function loadOSM(p,radius=SEARCH_RADIUS){
  }catch(e){ /* 取れなくても手入力データで動く */ }
 }
 // 地図を動かしたら、そのエリアの喫煙所も読み込む（ピンだけ増やす）
-map.on("moveend",()=>{ if(mode!=="browse"||follow) return; const c=map.getCenter(); loadOSM({lat:c.lat,lng:c.lng}).then(()=>drawAll()); });
+map.on("moveend",()=>{ if(mode!=="browse"||follow) return; const c=map.getCenter(); loadArea({lat:c.lat,lng:c.lng}).then(()=>drawAll()); });
 function drawAll(){ if(!me) return; const hid=hiddenIds(), now=new Date(); const keep=ranked[choice]?.id;
  const extra=spots.filter(s=>!hid.includes(s.id)&&typeOK(s)&&!ranked.some(r=>r.id===s.id)).map(s=>({...s,d:dist(me,s),st:status(s,now)}));
  ranked=ranked.concat(extra).sort(sorter); choice=Math.max(0,ranked.findIndex(r=>r.id===keep)); drawSpots(); }
@@ -529,7 +557,7 @@ $("ageNo").onclick=()=>{ $("ageText").textContent="申し訳ありません。20
 
 /* ===== 現在地 ===== */
 function setMe(p){
- const first=!me; me=p; drawMe(); loadOSM(p);
+ const first=!me; me=p; drawMe(); loadArea(p);
  if(mode==="nav") updateNav();
  else if(first||!ranked.length) rerank();
  else if(!gpsOK) rerank();
