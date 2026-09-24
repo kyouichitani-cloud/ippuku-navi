@@ -137,7 +137,7 @@ body{background:var(--bg);color:var(--ink);font-family:var(--body);font-size:15p
 <script>
 /* ===== 設定 ===== */
 const ROUTER="https://routing.openstreetmap.de/routed-foot/route/v1/driving/"; // 徒歩ルート（OSRM / FOSSGIS）
-const OVERPASS="https://overpass-api.de/api/interpreter";                       // OpenStreetMapの喫煙所データ
+const OVERPASS_SERVERS=["https://overpass-api.de/api/interpreter","https://overpass.private.coffee/api/interpreter"]; // OpenStreetMapの喫煙所データ
 const SEARCH_RADIUS=1500;   // m：この範囲の喫煙所を探す
 const ARRIVE_M=25;          // m：ここまで近づいたら到着
 const OFFROUTE_M=40;        // m：ルートからこれ以上離れたら再検索
@@ -197,8 +197,8 @@ function hideSpot(id){try{const o=JSON.parse(localStorage.getItem("ippuku-hidden
 /* ===== 地図 ===== */
 const dark=matchMedia("(prefers-color-scheme: dark)").matches;
 const map=L.map("map",{zoomControl:false,attributionControl:true}).setView([34.7015,135.4975],16);
-L.tileLayer(`https://{s}.basemaps.cartocdn.com/${dark?"dark_all":"light_all"}/{z}/{x}/{y}{r}.png`,{
- maxZoom:20,subdomains:"abcd",attribution:'&copy; <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a> &copy; <a href="https://carto.com/attributions">CARTO</a>'}).addTo(map);
+L.tileLayer("https://tile.openstreetmap.org/{z}/{x}/{y}.png",{
+ maxZoom:19,attribution:'&copy; <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a>'}).addTo(map);
 const spotLayer=L.layerGroup().addTo(map);
 let routeLine=null, routeCasing=null, meMarker=null;
 map.on("dragstart",()=>{follow=false;$("follow").classList.remove("on");});
@@ -224,7 +224,7 @@ function drawRoute(){
  if(routeLine){map.removeLayer(routeLine);map.removeLayer(routeCasing);routeLine=routeCasing=null;}
  if(!route) return;
  const c=getComputedStyle(document.documentElement);
- routeCasing=L.polyline(route.coords,{color:dark?"#0b1011":"#ffffff",weight:11,opacity:.9}).addTo(map);
+ routeCasing=L.polyline(route.coords,{color:"#ffffff",weight:11,opacity:.9}).addTo(map);
  routeLine=L.polyline(route.coords,{color:c.getPropertyValue("--route").trim()||"#0E6F74",weight:6}).addTo(map);
 }
 
@@ -234,13 +234,18 @@ async function loadOSM(p,radius=SEARCH_RADIUS){
  const key=p.lat.toFixed(2)+","+p.lng.toFixed(2)+"@"+radius; if(overpassDone.has(key)) return; overpassDone.add(key);
  const q=`[out:json][timeout:20];nwr["amenity"="smoking_area"](around:${radius},${p.lat},${p.lng});out center tags;`;
  try{
-  const res=await fetch(OVERPASS,{method:"POST",body:"data="+encodeURIComponent(q),headers:{"Content-Type":"application/x-www-form-urlencoded"}});
-  if(!res.ok) throw 0; const j=await res.json();
+  let j=null;
+  for(const base of OVERPASS_SERVERS){ // 混んでたら別のサーバーで再挑戦
+   try{ const ctl=new AbortController(); const tm=setTimeout(()=>ctl.abort(),25000);
+     const res=await fetch(base+"?data="+encodeURIComponent(q),{signal:ctl.signal}); clearTimeout(tm);
+     if(res.ok){ j=await res.json(); break; } }catch(e){}
+  }
+  if(!j){ overpassDone.delete(key); throw 0; }
   let added=0;
   for(const e of j.elements){
    const t=e.tags||{}; const lat=e.lat??e.center?.lat, lng=e.lon??e.center?.lon; if(lat==null) continue;
    if(t.fee==="yes"||["customers","private","no"].includes(t.access)) continue; // タダで入れる場所だけ
-   const s={id:"osm-"+e.type+e.id,lat,lng,name:t.name||t["name:ja"]||"喫煙所",place:t.indoor==="yes"?"屋内":t.covered==="yes"?"屋外（屋根あり）":"屋外",
+   const s={id:"osm-"+e.type+e.id,lat,lng,name:t["name:ja"]||t.name||"喫煙所（名称なし）",place:t.indoor==="yes"?"屋内":t.covered==="yes"?"屋外（屋根あり）":"屋外",
      floor:t.level!=null?(Number(t.level)<0?"B"+Math.abs(t.level):Number(t.level)+1+"F"):"地上",memo:t.description||t.note||"OpenStreetMapの登録データ",
      ohText:t.opening_hours==="24/7"?null:t.opening_hours, hours:t.opening_hours==="24/7"?[[0,1440]]:null};
    if(spots.some(x=>dist(x,s)<35)) continue; // 手入力データと重複したら手入力を優先
