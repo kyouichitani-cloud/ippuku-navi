@@ -1,0 +1,122 @@
+name: 喫煙所データの更新
+
+on:
+  schedule:
+    - cron: "17 18 * * 0"   # 毎週月曜 3:17（日本時間）
+  workflow_dispatch:         # 手動でも実行できる
+
+permissions:
+  contents: write
+
+jobs:
+  update:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: OpenStreetMapから日本の喫煙所を取得して地域ごとに分ける
+        run: |
+          python3 - <<'PY'
+          import json, math, os, re, time, urllib.parse, urllib.request
+
+          QUERY = """[out:json][timeout:900];
+          area["ISO3166-1"="JP"][admin_level=2]->.jp;
+          nwr["amenity"="smoking_area"](area.jp);
+          out center tags;"""
+          SERVERS = [
+              "https://overpass-api.de/api/interpreter",
+              "https://overpass.kumi.systems/api/interpreter",
+              "https://overpass.private.coffee/api/interpreter",
+          ]
+
+          data = None
+          for attempt in range(3):
+              for url in SERVERS:
+                  try:
+                      req = urllib.request.Request(
+                          url,
+                          data=urllib.parse.urlencode({"data": QUERY}).encode(),
+                          headers={"User-Agent": "ippuku-navi-data-updater (GitHub Actions)"},
+                      )
+                      with urllib.request.urlopen(req, timeout=1000) as r:
+                          data = json.load(r)
+                      print("取得OK:", url, len(data["elements"]), "件")
+                      break
+                  except Exception as e:
+                      print("失敗:", url, e)
+              if data:
+                  break
+              time.sleep(60)
+          if not data:
+              raise SystemExit("どのサーバーからも取得できませんでした")
+
+          def tobacco_of(t):
+              n = (t.get("name") or "") + " " + (t.get("description") or "")
+              if t.get("smoking:paper") == "no" or t.get("heated_tobacco") == "only" or (
+                  re.search(r"加熱式(たばこ)?(専用|のみ|エリア)|Ploom|IQOS|glo", n, re.I) and "紙巻" not in n):
+                  return "heated"
+              if t.get("smoking:paper") == "yes" or "紙巻" in n:
+                  return "both"
+              return None
+
+          def floor_of(t):
+              lv = t.get("level")
+              try:
+                  v = float(str(lv).split(";")[0])
+                  return f"B{int(abs(v))}" if v < 0 else f"{int(v) + 1}F"
+              except Exception:
+                  return "地上"
+
+          tiles = {}
+          kept = 0
+          for e in data["elements"]:
+              t = e.get("tags", {})
+              lat = e.get("lat") or (e.get("center") or {}).get("lat")
+              lng = e.get("lon") or (e.get("center") or {}).get("lon")
+              if lat is None or lng is None:
+                  continue
+              # タダで入れる場所だけ
+              if t.get("fee") == "yes" or t.get("access") in ("customers", "private", "no"):
+                  continue
+              covered = t.get("indoor") == "yes" or t.get("covered") == "yes" or t.get("shelter") in ("yes", "indoor")
+              rec = {
+                  "id": f"osm-{e['type']}{e['id']}",
+                  "lat": round(lat, 6), "lng": round(lng, 6),
+                  "name": t.get("name:ja") or t.get("name") or "喫煙所（名称なし）",
+                  "place": "屋内" if t.get("indoor") == "yes" else ("屋外（屋根あり）" if covered else "屋外"),
+                  "floor": floor_of(t),
+                  "memo": t.get("description") or t.get("note") or "OpenStreetMapの登録データ",
+                  "covered": covered,
+                  "tobacco": tobacco_of(t),
+                  "oh": t.get("opening_hours"),
+              }
+              key = f"{math.floor(lat * 10)}_{math.floor(lng * 10)}"   # 約10km四方のマス
+              tiles.setdefault(key, []).append(rec)
+              kept += 1
+
+          os.makedirs("data/tiles", exist_ok=True)
+          for f in os.listdir("data/tiles"):
+              os.remove(os.path.join("data/tiles", f))
+          for key, recs in tiles.items():
+              recs.sort(key=lambda r: r["id"])
+              with open(f"data/tiles/{key}.json", "w", encoding="utf-8") as f:
+                  json.dump(recs, f, ensure_ascii=False, separators=(",", ":"))
+          with open("data/index.json", "w", encoding="utf-8") as f:
+              json.dump({"tiles": sorted(tiles), "count": kept,
+                         "source": "© OpenStreetMap contributors (ODbL)"}, f, ensure_ascii=False)
+          print("保存:", kept, "件 /", len(tiles), "マス")
+          PY
+
+      - name: 変更があればコミット
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add data
+          if git diff --cached --quiet; then
+            echo "変更なし"
+          else
+            git commit -m "喫煙所データを更新"
+            git push
+          fi
+      
