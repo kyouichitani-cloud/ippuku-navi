@@ -210,7 +210,7 @@ const WALK_MPS=1.25;        // 徒歩の速さ（m/秒 ≒ 時速4.5km）
 
 /* ===== プレミアム（買い切り） ===== */
 const PRICE="300円";
-const PAYMENT_LINK="";            // Stripeの支払いリンク（https://buy.stripe.com/...）を入れると購入ボタンが有効になる
+const PAYMENT_LINK="https://buy.stripe.com/test_3cIeVc997dQO4S39uR3Nm00";          // Stripeの支払いリンク（https://buy.stripe.com/...）を入れると購入ボタンが有効になる
 const UNLOCK_CODE="ippuku-premium-2026"; // 支払い後に戻ってくるURLの ?unlock= の値（Stripe側の設定と合わせる）
 function lsGet(k,d){try{const v=localStorage.getItem(k);return v==null?d:JSON.parse(v);}catch(e){return d;}}
 function lsSet(k,v){try{localStorage.setItem(k,JSON.stringify(v));}catch(e){}}
